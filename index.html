@@ -51,10 +51,13 @@
     import { PitchDetector } from 'https://cdn.jsdelivr.net/npm/pitchy@4.0.1/dist/pitchy.esm.js';
 
     const noteNames = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
-    const TOL_CENTS = 35; // ~±35 cents tolerance
+    const TOL_CENTS = 35;         // ±35 cents tolerance
+    const PREGAIN_DB = 2.0;       // προενίσχυση ανάλυσης (1.0=ουδέτερο, 2.0≈+6dB)
+    const CLARITY_MIN = 0.6;      // ελάχιστο clarity για να θεωρηθεί έγκυρη μέτρηση
+    const DETECTOR_SIZE = 2048;   // παράθυρο Pitchy (ταιριάζει με τα samples που ταΐζουμε)
 
     let fretboard = [];
-    let audioCtx, analyser, dataArray, source, detector;
+    let audioCtx, analyser, dataArray, source, detector, preGain;
     let target = null, round = 0, score = 0;
     let paused = false, gameActive = false, timeoutHandle = null, timerInterval = null, pollHandle = null;
     let timeLeft = 0, totalTime = 0;
@@ -78,18 +81,31 @@
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         source = audioCtx.createMediaStreamSource(stream);
+
+        // Προενίσχυση πριν από τον analyser (ΔΕΝ συνδέεται στο destination -> δεν ακούγεται/δεν κάνει feedback)
+        preGain = audioCtx.createGain();
+        preGain.gain.value = PREGAIN_DB;
+
         analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 2048; // enough for Pitchy buffer
-        dataArray = new Float32Array(1024); // detector window
-        source.connect(analyser);
-        detector = PitchDetector.forFloat32Array(1024);
+        analyser.fftSize = 4096; // ↑ μεγαλύτερο FFT για χαμηλές συχνότητες
+        const fftLen = analyser.fftSize;
+        const tmpBuffer = new Float32Array(fftLen);
+        dataArray = new Float32Array(DETECTOR_SIZE); // τροφοδοσία Pitchy
+
+        source.connect(preGain);
+        preGain.connect(analyser);
+
+        detector = PitchDetector.forFloat32Array(DETECTOR_SIZE);
+
+        // Αποθηκεύουμε βοηθητικά buffers στο αντικείμενο ώστε να τα ξαναχρησιμοποιούμε στη sampleAndJudge
+        initMic._tmpBuffer = tmpBuffer;
       }
     }
 
     function midiFromFreq(f){ return 69 + 12 * Math.log2(f/440); }
     function freqFromMidi(m){ return 440 * Math.pow(2, (m-69)/12); }
-    function noteIndexFromMidi(m){ // 0=C ... 11=B
-      return ((Math.round(m) - 12) % 12 + 12) % 12;
+    function noteIndexFromMidi(m){
+      return ((Math.round(m) - 12) % 12 + 12) % 12; // 0=C ... 11=B
     }
 
     function startGame(){
@@ -150,28 +166,24 @@
 
     function sampleAndJudge(){
       if (!gameActive || paused) return;
-      // pull 1024 samples
-      const tmp = new Float32Array(analyser.fftSize);
+
+      // Πάρε fftSize δείγματα από τον analyser και κόψε κεντρικά DETECTOR_SIZE για το Pitchy
+      const tmp = initMic._tmpBuffer;
       analyser.getFloatTimeDomainData(tmp);
-      // center-cut to 1024 window for detector
-      for (let i=0;i<1024;i++) dataArray[i] = tmp[i];
+      const start = Math.floor((tmp.length - DETECTOR_SIZE)/2);
+      for (let i=0;i<DETECTOR_SIZE;i++) dataArray[i] = tmp[start + i];
 
       const [pitch, clarity] = detector.findPitch(dataArray, audioCtx.sampleRate);
-      if (!pitch || !isFinite(pitch) || clarity < 0.7) return; // ignore noisy frames
+      if (!pitch || !isFinite(pitch) || clarity < CLARITY_MIN) return; // αγνόησε θορυβώδεις μετρήσεις
 
-      // nearest semitone to the played pitch
       const playedMidi = Math.round(midiFromFreq(pitch));
       const playedFreqNearest = freqFromMidi(playedMidi);
       const playedIndex = noteIndexFromMidi(playedMidi);
-
-      // target note index (octave-insensitive)
       const targetIndex = noteNames.indexOf(target.note);
-
-      // cents error to nearest semitone
       const centsErr = 1200 * Math.log2(pitch / playedFreqNearest);
 
       if (playedIndex === targetIndex && Math.abs(centsErr) <= TOL_CENTS){
-        // CORRECT: instant beep + next question
+        // CORRECT
         score++;
         document.getElementById("result").innerText = `✅ Correct! ${target.note} (~${pitch.toFixed(1)} Hz)`;
         document.getElementById("score").innerText = `Score: ${score} / ${round}`;
@@ -181,10 +193,8 @@
         stopPolling();
         setTimeout(nextRound, 400);
       } else {
-        // WRONG so far — give feedback but DO NOT advance; player can try again until timeout
+        // WRONG feedback, μένει μέχρι timeout
         document.getElementById("result").innerText = `❌ Wrong (~${noteNames[playedIndex]} • ${pitch.toFixed(1)} Hz). Target: ${target.note}`;
-        // soft wrong beep (don’t spam every 120ms)
-        // Play once every ~900ms: simple throttle
         if (!sampleAndJudge._lastWrong || performance.now() - sampleAndJudge._lastWrong > 900) {
           playBeep("wrong");
           sampleAndJudge._lastWrong = performance.now();
