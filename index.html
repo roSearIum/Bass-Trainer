@@ -4,43 +4,55 @@
   <meta charset="UTF-8">
   <title>Bassist's Game</title>
   <style>
-    body { 
-      font-family: Arial, sans-serif; 
-      text-align:center; 
-      margin-top:30px; 
-      background-color: #000;
-      color: #fff;
+    body {
+      font-family: Arial, sans-serif;
+      text-align:center;
+      margin:0; padding:30px 10px;
+      background:#000; color:#fff;
     }
-    h1 { font-size: 42px; margin-bottom: 10px; color: #fff; }
-    #note { font-size: 72px; margin:20px; color: #e74c3c; font-weight: bold; }
-    #result { font-size: 28px; margin:15px; }
-    #score { font-size: 22px; margin:20px; }
-    #timer { font-size: 20px; color: #ffcc00; margin:10px; }
-    button, select { padding:10px 20px; font-size:18px; margin: 5px; }
-    .progress-container { width: 300px; height: 20px; background: #333; margin: 10px auto; border-radius: 10px; overflow: hidden; }
+    h1 { font-size: 42px; margin: 0 0 10px; }
+    #note { font-size: 72px; margin:20px 0; color: #e74c3c; font-weight: 800; letter-spacing: 1px; }
+    #result { font-size: 28px; margin:10px 0 6px; min-height: 34px; }
+    #score { font-size: 22px; margin:16px 0; }
+    #timer { font-size: 20px; color: #ffcc00; margin:6px 0 8px; min-height: 24px; }
+    .controls { margin: 8px 0 14px; display:flex; gap:8px; justify-content:center; flex-wrap: wrap; }
+    select, button {
+      padding:10px 16px; font-size:18px; border-radius:8px; border:1px solid #333;
+      background:#111; color:#fff; cursor:pointer;
+    }
+    button:hover, select:hover { background:#151515; }
+    .progress-container { width: 320px; height: 20px; background: #333; margin: 10px auto; border-radius: 10px; overflow: hidden; }
     .progress-bar { height: 100%; background: #e74c3c; width: 100%; transition: width 1s linear; }
+    .status { font-size:14px; color:#aaa; margin-top:10px; min-height:18px; }
+    .error { color:#ff6b6b; }
+    .ok    { color:#7fffd4; }
   </style>
 </head>
 <body>
   <h1>Bassist's Game</h1>
 
-  <div>
-    Instrument:
-    <select id="instrument">
-      <option value="4">Bass 4 Strings (EADG)</option>
-      <option value="5" selected>Bass 5 Strings (BEADG)</option>
-    </select>
-  </div>
+  <div class="controls">
+    <label>
+      Instrument:
+      <select id="instrument">
+        <option value="4">Bass 4 Strings (EADG)</option>
+        <option value="5" selected>Bass 5 Strings (BEADG)</option>
+      </select>
+    </label>
 
-  <div>
-    Difficulty:
-    <select id="difficulty">
-      <option value="10000">Very Easy (10s)</option>
-      <option value="6000">Easy (6s)</option>
-      <option value="4000">Intermediate (4s)</option>
-      <option value="3000" selected>Advanced (3s)</option>
-      <option value="2000">Ass Kicker (2s)</option>
-    </select>
+    <label>
+      Difficulty:
+      <select id="difficulty">
+        <option value="10000">Very Easy (10s)</option>
+        <option value="6000">Easy (6s)</option>
+        <option value="4000">Intermediate (4s)</option>
+        <option value="3000" selected>Advanced (3s)</option>
+        <option value="2000">Ass Kicker (2s)</option>
+      </select>
+    </label>
+
+    <button id="startBtn">Start Game</button>
+    <button id="pauseBtn">Pause / Resume</button>
   </div>
 
   <div id="note">Press Start</div>
@@ -48,25 +60,50 @@
   <div id="timer"></div>
   <div class="progress-container"><div class="progress-bar" id="progressBar"></div></div>
   <div id="score"></div>
+  <div id="status" class="status"></div>
 
-  <button onclick="startGame()">Start Game</button>
-  <button onclick="togglePause()">Pause / Resume</button>
-
-  <!-- Pitchy -->
+  <!-- Main app (no inline handlers; buttons bound via addEventListener) -->
   <script type="module">
-    import { PitchDetector } from 'https://cdn.jsdelivr.net/npm/pitchy@4.0.1/dist/pitchy.esm.js';
+    const statusEl = document.getElementById('status');
 
+    // Dynamically import Pitchy and start app
+    let PitchDetector;
+    try {
+      ({ PitchDetector } = await import('https://cdn.jsdelivr.net/npm/pitchy@4.0.1/dist/pitchy.esm.js'));
+      statusEl.innerText = 'Pitchy loaded.';
+      statusEl.classList.add('ok');
+    } catch (e) {
+      statusEl.innerText = 'Error: Could not load Pitchy. Check your connection or CDN.';
+      statusEl.classList.add('error');
+      console.error(e);
+      // Do not proceed without pitchy
+      throw e;
+    }
+
+    // ---------- App Code ----------
     const noteNames = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
-    const TOL_CENTS = 35;
-    const PREGAIN_DB = 2.0;
-    const CLARITY_MIN = 0.6;
+    const TOL_CENTS   = 35;   // ±35 cents
+    const PREGAIN_DB  = 2.0;  // ~ +6dB analysis gain
+    const CLARITY_MIN = 0.6;  // accept a bit noisier frames
     const DETECTOR_SIZE = 2048;
+
+    const instrumentSel = document.getElementById('instrument');
+    const difficultySel = document.getElementById('difficulty');
+    const startBtn = document.getElementById('startBtn');
+    const pauseBtn = document.getElementById('pauseBtn');
+
+    const noteEl   = document.getElementById('note');
+    const resultEl = document.getElementById('result');
+    const scoreEl  = document.getElementById('score');
+    const timerEl  = document.getElementById('timer');
+    const barEl    = document.getElementById('progressBar');
 
     let fretboard = [];
     let audioCtx, analyser, dataArray, source, detector, preGain;
     let target = null, round = 0, score = 0;
     let paused = false, gameActive = false, timeoutHandle = null, timerInterval = null, pollHandle = null;
     let timeLeft = 0, totalTime = 0;
+    let tmpBuffer; // analyser buffer
 
     function buildFretboard(type){
       const strings = (type==="5")
@@ -83,7 +120,8 @@
     }
 
     async function initMic(){
-      if(!audioCtx){
+      if (audioCtx) return;
+      try {
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         source = audioCtx.createMediaStreamSource(stream);
@@ -92,16 +130,22 @@
         preGain.gain.value = PREGAIN_DB;
 
         analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 4096;
-        const fftLen = analyser.fftSize;
-        const tmpBuffer = new Float32Array(fftLen);
-        dataArray = new Float32Array(DETECTOR_SIZE);
+        analyser.fftSize = 4096; // better for lows
+        tmpBuffer = new Float32Array(analyser.fftSize);
 
+        dataArray = new Float32Array(DETECTOR_SIZE);
         source.connect(preGain);
         preGain.connect(analyser);
 
         detector = PitchDetector.forFloat32Array(DETECTOR_SIZE);
-        initMic._tmpBuffer = tmpBuffer;
+
+        statusEl.innerText = 'Mic ready.';
+        statusEl.classList.add('ok');
+      } catch (err) {
+        statusEl.innerText = 'Mic access denied or failed. Check browser permissions.';
+        statusEl.classList.add('error');
+        console.error(err);
+        throw err;
       }
     }
 
@@ -110,45 +154,45 @@
     function noteIndexFromMidi(m){ return ((Math.round(m) - 12) % 12 + 12) % 12; }
 
     function startGame(){
-      buildFretboard(document.getElementById("instrument").value);
+      buildFretboard(instrumentSel.value);
       score = 0; round = 0; gameActive = true; paused = false;
-      document.getElementById("score").innerText = `Score: 0 / 0`;
-      initMic().then(nextRound);
+      scoreEl.innerText = `Score: 0 / 0`;
+      initMic().then(nextRound).catch(()=>{ /* already messaged */ });
     }
 
     function nextRound(){
       if (!gameActive || paused) return;
       if (round >= 35){
-        document.getElementById("note").innerText="Game Over!";
-        document.getElementById("result").innerText=`Final Score: ${score} / ${round}`;
-        document.getElementById("timer").innerText="";
-        document.getElementById("progressBar").style.width="0%";
+        noteEl.innerText   = "Game Over!";
+        resultEl.innerText = `Final Score: ${score} / ${round}`;
+        timerEl.innerText  = "";
+        barEl.style.width  = "0%";
         stopPolling();
         gameActive = false;
         return;
       }
       target = fretboard[Math.floor(Math.random()*fretboard.length)];
       round++;
-      document.getElementById("note").innerText = `${target.note} on ${target.string}`;
-      document.getElementById("result").innerText = "Play now!";
+      noteEl.innerText   = `${target.note} on ${target.string}`;
+      resultEl.innerText = "Play now!";
 
-      totalTime = parseInt(document.getElementById("difficulty").value);
+      totalTime = parseInt(difficultySel.value, 10);
       timeLeft = totalTime/1000;
-      document.getElementById("timer").innerText = `Time left: ${timeLeft}s`;
-      document.getElementById("progressBar").style.width="100%";
+      timerEl.innerText = `Time left: ${timeLeft}s`;
+      barEl.style.width = "100%";
 
       clearInterval(timerInterval);
       timerInterval = setInterval(()=>{
         timeLeft -= 1;
         if (timeLeft>=0){
-          document.getElementById("timer").innerText = `Time left: ${timeLeft}s`;
-          document.getElementById("progressBar").style.width = (timeLeft*1000/totalTime*100) + "%";
+          timerEl.innerText = `Time left: ${timeLeft}s`;
+          barEl.style.width = (timeLeft*1000/totalTime*100) + "%";
         }
       },1000);
 
       clearTimeout(timeoutHandle);
       timeoutHandle = setTimeout(()=>{
-        document.getElementById("result").innerText="⏰ Timeout / No sound";
+        resultEl.innerText = "⏰ Timeout / No sound";
         playBeep("wrong");
         stopPolling();
         setTimeout(nextRound,1000);
@@ -167,10 +211,10 @@
 
     function sampleAndJudge(){
       if (!gameActive || paused) return;
-      const tmp = initMic._tmpBuffer;
-      analyser.getFloatTimeDomainData(tmp);
-      const start = Math.floor((tmp.length - DETECTOR_SIZE)/2);
-      for (let i=0;i<DETECTOR_SIZE;i++) dataArray[i] = tmp[start + i];
+
+      analyser.getFloatTimeDomainData(tmpBuffer);
+      const start = Math.floor((tmpBuffer.length - DETECTOR_SIZE)/2);
+      for (let i=0;i<DETECTOR_SIZE;i++) dataArray[i] = tmpBuffer[start + i];
 
       const [pitch, clarity] = detector.findPitch(dataArray, audioCtx.sampleRate);
       if (!pitch || !isFinite(pitch) || clarity < CLARITY_MIN) return;
@@ -183,15 +227,15 @@
 
       if (playedIndex === targetIndex && Math.abs(centsErr) <= TOL_CENTS){
         score++;
-        document.getElementById("result").innerText = `✅ Correct! ${target.note} (~${pitch.toFixed(1)} Hz)`;
-        document.getElementById("score").innerText = `Score: ${score} / ${round}`;
+        resultEl.innerText = `✅ Correct! ${target.note} (~${pitch.toFixed(1)} Hz)`;
+        scoreEl.innerText  = `Score: ${score} / ${round}`;
         playBeep("correct");
         clearTimeout(timeoutHandle);
         clearInterval(timerInterval);
         stopPolling();
         setTimeout(nextRound, 400);
       } else {
-        document.getElementById("result").innerText = `❌ Wrong (~${noteNames[playedIndex]} • ${pitch.toFixed(1)} Hz). Target: ${target.note}`;
+        resultEl.innerText = `❌ Wrong (~${noteNames[playedIndex]} • ${pitch.toFixed(1)} Hz). Target: ${target.note}`;
         if (!sampleAndJudge._lastWrong || performance.now() - sampleAndJudge._lastWrong > 900) {
           playBeep("wrong");
           sampleAndJudge._lastWrong = performance.now();
@@ -205,9 +249,9 @@
         clearTimeout(timeoutHandle);
         clearInterval(timerInterval);
         stopPolling();
-        document.getElementById("result").innerText="⏸ Paused";
+        resultEl.innerText = "⏸ Paused";
       } else {
-        document.getElementById("result").innerText="▶ Resumed";
+        resultEl.innerText = "▶ Resumed";
         setTimeout(nextRound,500);
       }
     }
@@ -225,9 +269,9 @@
       osc.stop(ctx.currentTime + 0.15);
     }
 
-    // expose functions for buttons
-    window.startGame = startGame;
-    window.togglePause = togglePause;
+    // Bind buttons AFTER script loads (no inline handlers)
+    startBtn.addEventListener('click', startGame);
+    pauseBtn.addEventListener('click', togglePause);
   </script>
 </body>
 </html>
