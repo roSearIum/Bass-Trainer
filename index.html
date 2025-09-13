@@ -4,14 +4,20 @@
   <meta charset="UTF-8">
   <title>Bassist's Game</title>
   <style>
-    body { font-family: Arial, sans-serif; text-align:center; margin-top:30px; }
-    h1 { font-size: 42px; margin-bottom: 10px; }
-    #note { font-size: 40px; margin:20px; }
-    #result { font-size: 24px; margin:15px; }
-    #score { font-size: 20px; margin:20px; }
-    #timer { font-size: 18px; color: darkred; margin:10px; }
+    body { 
+      font-family: Arial, sans-serif; 
+      text-align:center; 
+      margin-top:30px; 
+      background-color: #000;
+      color: #fff;
+    }
+    h1 { font-size: 42px; margin-bottom: 10px; color: #fff; }
+    #note { font-size: 72px; margin:20px; color: #e74c3c; font-weight: bold; }
+    #result { font-size: 28px; margin:15px; }
+    #score { font-size: 22px; margin:20px; }
+    #timer { font-size: 20px; color: #ffcc00; margin:10px; }
     button, select { padding:10px 20px; font-size:18px; margin: 5px; }
-    .progress-container { width: 300px; height: 20px; background: #ddd; margin: 10px auto; border-radius: 10px; overflow: hidden; }
+    .progress-container { width: 300px; height: 20px; background: #333; margin: 10px auto; border-radius: 10px; overflow: hidden; }
     .progress-bar { height: 100%; background: #e74c3c; width: 100%; transition: width 1s linear; }
   </style>
 </head>
@@ -46,15 +52,15 @@
   <button onclick="startGame()">Start Game</button>
   <button onclick="togglePause()">Pause / Resume</button>
 
-  <!-- Pitchy (ESM) -->
+  <!-- Pitchy -->
   <script type="module">
     import { PitchDetector } from 'https://cdn.jsdelivr.net/npm/pitchy@4.0.1/dist/pitchy.esm.js';
 
     const noteNames = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
-    const TOL_CENTS = 35;         // ±35 cents tolerance
-    const PREGAIN_DB = 2.0;       // προενίσχυση ανάλυσης (1.0=ουδέτερο, 2.0≈+6dB)
-    const CLARITY_MIN = 0.6;      // ελάχιστο clarity για να θεωρηθεί έγκυρη μέτρηση
-    const DETECTOR_SIZE = 2048;   // παράθυρο Pitchy (ταιριάζει με τα samples που ταΐζουμε)
+    const TOL_CENTS = 35;
+    const PREGAIN_DB = 2.0;
+    const CLARITY_MIN = 0.6;
+    const DETECTOR_SIZE = 2048;
 
     let fretboard = [];
     let audioCtx, analyser, dataArray, source, detector, preGain;
@@ -82,31 +88,26 @@
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         source = audioCtx.createMediaStreamSource(stream);
 
-        // Προενίσχυση πριν από τον analyser (ΔΕΝ συνδέεται στο destination -> δεν ακούγεται/δεν κάνει feedback)
         preGain = audioCtx.createGain();
         preGain.gain.value = PREGAIN_DB;
 
         analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 4096; // ↑ μεγαλύτερο FFT για χαμηλές συχνότητες
+        analyser.fftSize = 4096;
         const fftLen = analyser.fftSize;
         const tmpBuffer = new Float32Array(fftLen);
-        dataArray = new Float32Array(DETECTOR_SIZE); // τροφοδοσία Pitchy
+        dataArray = new Float32Array(DETECTOR_SIZE);
 
         source.connect(preGain);
         preGain.connect(analyser);
 
         detector = PitchDetector.forFloat32Array(DETECTOR_SIZE);
-
-        // Αποθηκεύουμε βοηθητικά buffers στο αντικείμενο ώστε να τα ξαναχρησιμοποιούμε στη sampleAndJudge
         initMic._tmpBuffer = tmpBuffer;
       }
     }
 
     function midiFromFreq(f){ return 69 + 12 * Math.log2(f/440); }
     function freqFromMidi(m){ return 440 * Math.pow(2, (m-69)/12); }
-    function noteIndexFromMidi(m){
-      return ((Math.round(m) - 12) % 12 + 12) % 12; // 0=C ... 11=B
-    }
+    function noteIndexFromMidi(m){ return ((Math.round(m) - 12) % 12 + 12) % 12; }
 
     function startGame(){
       buildFretboard(document.getElementById("instrument").value);
@@ -128,7 +129,7 @@
       }
       target = fretboard[Math.floor(Math.random()*fretboard.length)];
       round++;
-      document.getElementById("note").innerText = `${target.note} on ${target.string} string`;
+      document.getElementById("note").innerText = `${target.note} on ${target.string}`;
       document.getElementById("result").innerText = "Play now!";
 
       totalTime = parseInt(document.getElementById("difficulty").value);
@@ -158,7 +159,7 @@
 
     function startPolling(){
       stopPolling();
-      pollHandle = setInterval(sampleAndJudge, 120); // ~8x/sec
+      pollHandle = setInterval(sampleAndJudge, 120);
     }
     function stopPolling(){
       if (pollHandle){ clearInterval(pollHandle); pollHandle=null; }
@@ -166,15 +167,13 @@
 
     function sampleAndJudge(){
       if (!gameActive || paused) return;
-
-      // Πάρε fftSize δείγματα από τον analyser και κόψε κεντρικά DETECTOR_SIZE για το Pitchy
       const tmp = initMic._tmpBuffer;
       analyser.getFloatTimeDomainData(tmp);
       const start = Math.floor((tmp.length - DETECTOR_SIZE)/2);
       for (let i=0;i<DETECTOR_SIZE;i++) dataArray[i] = tmp[start + i];
 
       const [pitch, clarity] = detector.findPitch(dataArray, audioCtx.sampleRate);
-      if (!pitch || !isFinite(pitch) || clarity < CLARITY_MIN) return; // αγνόησε θορυβώδεις μετρήσεις
+      if (!pitch || !isFinite(pitch) || clarity < CLARITY_MIN) return;
 
       const playedMidi = Math.round(midiFromFreq(pitch));
       const playedFreqNearest = freqFromMidi(playedMidi);
@@ -183,7 +182,6 @@
       const centsErr = 1200 * Math.log2(pitch / playedFreqNearest);
 
       if (playedIndex === targetIndex && Math.abs(centsErr) <= TOL_CENTS){
-        // CORRECT
         score++;
         document.getElementById("result").innerText = `✅ Correct! ${target.note} (~${pitch.toFixed(1)} Hz)`;
         document.getElementById("score").innerText = `Score: ${score} / ${round}`;
@@ -193,7 +191,6 @@
         stopPolling();
         setTimeout(nextRound, 400);
       } else {
-        // WRONG feedback, μένει μέχρι timeout
         document.getElementById("result").innerText = `❌ Wrong (~${noteNames[playedIndex]} • ${pitch.toFixed(1)} Hz). Target: ${target.note}`;
         if (!sampleAndJudge._lastWrong || performance.now() - sampleAndJudge._lastWrong > 900) {
           playBeep("wrong");
@@ -227,6 +224,10 @@
       osc.start();
       osc.stop(ctx.currentTime + 0.15);
     }
+
+    // expose functions for buttons
+    window.startGame = startGame;
+    window.togglePause = togglePause;
   </script>
 </body>
 </html>
