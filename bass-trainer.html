@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>5-String Bass Trainer</title>
+  <style>
+    body { font-family: Arial, sans-serif; text-align:center; margin-top:50px; }
+    #note { font-size: 40px; margin:20px; }
+    #result { font-size: 24px; margin:15px; }
+    #score { font-size: 20px; margin:20px; }
+    button, select { padding:10px 20px; font-size:18px; margin: 5px; }
+  </style>
+</head>
+<body>
+  <h1>5-String Bass Trainer</h1>
+  <div>
+    Difficulty: 
+    <select id="difficulty">
+      <option value="6000">Easy (6s)</option>
+      <option value="4000">Intermediate (4s)</option>
+      <option value="3000" selected>Advanced (3s)</option>
+      <option value="2000">Ass Kicker (2s)</option>
+    </select>
+  </div>
+  <div id="note">Press Start</div>
+  <div id="result"></div>
+  <div id="score"></div>
+  <button onclick="startGame()">Start Game</button>
+  <button onclick="togglePause()">Pause / Resume</button>
+
+  <script>
+    // Tuning for 5-string bass B0-E1-A1-D2-G2
+    const strings = [
+      {name:"B", freq:30.87},
+      {name:"E", freq:41.20},
+      {name:"A", freq:55.00},
+      {name:"D", freq:73.42},
+      {name:"G", freq:98.00}
+    ];
+
+    // Notes in chromatic scale
+    const noteNames = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+
+    // Build fretboard (up to 12th fret)
+    let fretboard = [];
+    for (let s of strings){
+      for (let fret=0; fret<=12; fret++){
+        let freq = s.freq * Math.pow(2, fret/12);
+        let n = noteNames[Math.round(12 * Math.log2(freq/16.35)) % 12];
+        fretboard.push({string:s.name, fret:fret, note:n, freq:freq});
+      }
+    }
+
+    // Audio stuff
+    let audioCtx, analyser, dataArray, source;
+
+    let target = null;
+    let round = 0;
+    let score = 0;
+    let paused = false;
+    let gameActive = false;
+    let timeoutHandle = null;
+
+    async function initMic(){
+      if(!audioCtx){
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        let stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        source = audioCtx.createMediaStreamSource(stream);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 2048;
+        dataArray = new Float32Array(analyser.fftSize);
+        source.connect(analyser);
+      }
+    }
+
+    function autoCorrelate(buf, sampleRate) {
+      let SIZE = buf.length;
+      let rms = 0;
+      for (let i=0;i<SIZE;i++) rms += buf[i]*buf[i];
+      rms = Math.sqrt(rms/SIZE);
+      if (rms<0.01) return -1;
+      let r1=0,r2=SIZE-1,thres=0.2;
+      for (let i=0;i<SIZE/2;i++) if (Math.abs(buf[i])<thres) { r1=i; break;}
+      for (let i=1;i<SIZE/2;i++) if (Math.abs(buf[SIZE-i])<thres) { r2=SIZE-i; break;}
+      buf = buf.slice(r1,r2);
+      SIZE = buf.length;
+      let c = new Array(SIZE).fill(0);
+      for (let i=0;i<SIZE;i++) for (let j=0;j<SIZE-i;j++) c[i]+=buf[j]*buf[j+i];
+      let d=0; while (c[d]>c[d+1]) d++;
+      let maxval=-1, maxpos=-1;
+      for (let i=d;i<SIZE;i++){ if (c[i]>maxval){ maxval=c[i]; maxpos=i;}}
+      let T0=maxpos;
+      return sampleRate/T0;
+    }
+
+    async function startGame(){
+      score = 0; round = 0; gameActive = true; paused = false;
+      document.getElementById("score").innerText = `Score: 0 / 0`;
+      await initMic();
+      nextRound();
+    }
+
+    function nextRound(){
+      if (!gameActive || paused) return;
+      if (round >= 35){
+        document.getElementById("note").innerText="Game Over!";
+        document.getElementById("result").innerText=`Final Score: ${score} / ${round}`;
+        gameActive = false;
+        return;
+      }
+      target = fretboard[Math.floor(Math.random()*fretboard.length)];
+      round++;
+      document.getElementById("note").innerText = `${target.note} on ${target.string} string (fret ${target.fret})`;
+      document.getElementById("result").innerText = "Play now!";
+      
+      let limit = parseInt(document.getElementById("difficulty").value);
+      timeoutHandle = setTimeout(checkNote, limit);
+    }
+
+    function checkNote(){
+      if (!gameActive || paused) return;
+      analyser.getFloatTimeDomainData(dataArray);
+      let pitch = autoCorrelate(dataArray,audioCtx.sampleRate);
+      if (pitch==-1){
+        document.getElementById("result").innerText="⏰ Timeout / No sound";
+      } else {
+        // Find closest note
+        let closest = null, minDiff=1e9;
+        for (let fb of fretboard){
+          let diff = Math.abs(fb.freq - pitch);
+          if (diff<minDiff){ minDiff=diff; closest=fb; }
+        }
+        let played = closest.note;
+        if (played===target.note){
+          score++;
+          document.getElementById("result").innerText=`✅ Correct! You played ${played}`;
+        } else {
+          document.getElementById("result").innerText=`❌ Wrong. You played ${played} (target was ${target.note})`;
+        }
+      }
+      document.getElementById("score").innerText = `Score: ${score} / ${round}`;
+      setTimeout(nextRound,1000);
+    }
+
+    function togglePause(){
+      paused = !paused;
+      if (paused){
+        clearTimeout(timeoutHandle);
+        document.getElementById("result").innerText="⏸ Paused";
+      } else {
+        document.getElementById("result").innerText="▶ Resumed";
+        setTimeout(nextRound,1000);
+      }
+    }
+  </script>
+</body>
+</html>
