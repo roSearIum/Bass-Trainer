@@ -54,58 +54,60 @@
   <div id="score"></div>
   <div id="status" class="status"></div>
 
-  <!-- Loader που δοκιμάζει 2 CDNs για την Pitchy -->
   <script>
-    function loadScript(urls, onOk, onFail){
-      const tryNext = (i) => {
-        if (i >= urls.length) { onFail && onFail(); return; }
-        const s = document.createElement('script');
-        s.src = urls[i];
-        s.async = true;
-        s.onload = () => onOk && onOk();
-        s.onerror = () => tryNext(i+1);
-        document.head.appendChild(s);
-      };
-      tryNext(0);
-    }
-  </script>
-  <script>
-    const statusEl = document.getElementById('status');
-    function setStatus(msg, cls){
-      statusEl.className = 'status' + (cls ? ' ' + cls : '');
-      statusEl.textContent = msg;
-    }
-    setStatus('Loading Pitchy…');
+    // ------------------ Utility / Constants ------------------
+    const noteNames = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+    const TOL_CENTS = 35;    // ±35 cents (= ~1/3 ημιτόνιο)
+    const PREGAIN   = 2.5;   // προενίσχυση ανάλυσης (~+8 dB)
+    const CLARITY_MIN = 0.6; // κατώφλι αξιοπιστίας για YIN
 
-    // jsDelivr -> unpkg fallback
-    loadScript(
-      [
-        'https://cdn.jsdelivr.net/npm/pitchy@4.0.1/dist/pitchy.umd.js',
-        'https://unpkg.com/pitchy@4.0.1/dist/pitchy.umd.js'
-      ],
-      () => {
-        if (!window.pitchy || !window.pitchy.PitchDetector){
-          setStatus('Pitchy loaded but not available. Try refresh.', 'error');
-          return;
+    function midiFromFreq(f){ return 69 + 12 * Math.log2(f/440); }
+    function freqFromMidi(m){ return 440 * Math.pow(2, (m-69)/12); }
+    function noteIndexFromMidi(m){ return ((Math.round(m) - 12) % 12 + 12) % 12; }
+
+    // ------------------ Lightweight YIN Pitch Detector ------------------
+    // Επιστρέφει [pitchHz | null, probability 0..1]
+    function yinPitch(buffer, sampleRate){
+      // Βασισμένο σε YIN (AMDF + cumulative mean normalized difference)
+      const n = buffer.length;
+      const tauMax = Math.floor(n/2);
+      const yin = new Float32Array(tauMax);
+      let runningSum = 0;
+
+      // Difference function d(tau)
+      for (let tau=1; tau<tauMax; tau++){
+        let sum = 0;
+        for (let i=0; i<tauMax; i++){
+          const d = buffer[i] - buffer[i+tau];
+          sum += d*d;
         }
-        setStatus('Pitchy loaded. Click Start Game and allow the mic.', 'ok');
-        startApp();
-      },
-      () => setStatus('Error: Could not load Pitchy from any CDN.', 'error')
-    );
-  </script>
+        yin[tau] = sum;
+      }
+      // Cumulative mean normalized difference CMND
+      yin[0] = 1;
+      for (let tau=1; tau<tauMax; tau++){
+        runningSum += yin[tau];
+        yin[tau] = (runningSum ? yin[tau] * tau / runningSum : 1);
+      }
+      // Absolute threshold
+      let tau = 2;
+      for (; tau<tauMax; tau++){
+        if (yin[tau] < (1 - CLARITY_MIN)) break; // όσο μεγαλύτερο clarity, τόσο μικρότερο κατώφλι
+      }
+      if (tau === tauMax) return [null, 0];
 
-  <!-- Κύριο app -->
-  <script>
-  function startApp(){
-    const { PitchDetector } = window.pitchy;
+      // Parabolic interpolation για πιο ακριβές τ
+      let x0 = (tau < 1) ? tau : tau-1;
+      let x2 = (tau+1 < tauMax) ? tau+1 : tau;
+      const s0 = yin[x0], s1 = yin[tau], s2 = yin[x2];
+      const betterTau = (x0===tau || x2===tau) ? tau : tau + (s2 - s0) / (2*(2*s1 - s2 - s0));
 
-    const noteNames    = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
-    const TOL_CENTS    = 35;
-    const PREGAIN_DB   = 2.5;
-    const CLARITY_MIN  = 0.6;
-    const DETECTOR_SIZE= 2048;
+      const pitch = sampleRate / betterTau;
+      const probability = 1 - s1; // πρόχειρη εκτίμηση αξιοπιστίας
+      return [pitch, probability];
+    }
 
+    // ------------------ App State ------------------
     const instrumentSel= document.getElementById('instrument');
     const difficultySel= document.getElementById('difficulty');
     const startBtn     = document.getElementById('startBtn');
@@ -115,11 +117,17 @@
     const scoreEl      = document.getElementById('score');
     const timerEl      = document.getElementById('timer');
     const barEl        = document.getElementById('progressBar');
+    const statusEl     = document.getElementById('status');
 
-    let fretboard=[], audioCtx, analyser, dataArray, source, detector, preGain;
+    let fretboard=[], audioCtx, analyser, dataBuf, source, preGainNode;
     let target=null, round=0, score=0;
     let paused=false, gameActive=false, timeoutHandle=null, timerInterval=null, pollHandle=null;
     let timeLeft=0, totalTime=0, tmpBuffer;
+
+    function setStatus(msg, cls){
+      statusEl.className = 'status' + (cls ? ' ' + cls : '');
+      statusEl.textContent = msg;
+    }
 
     function buildFretboard(type){
       const strings = (type==="5")
@@ -128,45 +136,41 @@
       fretboard = [];
       for (let s of strings){
         for (let fret=0; fret<=12; fret++){
-          const freq = s.freq * Math.pow(2, fret/12);
-          const n = noteNames[Math.round(12 * Math.log2(freq/16.35)) % 12];
-          fretboard.push({string:s.name, fret:fret, note:n, freq:freq});
+          const f = s.freq * Math.pow(2, fret/12);
+          const n = noteNames[Math.round(12 * Math.log2(f/16.35)) % 12];
+          fretboard.push({string:s.name, fret:fret, note:n, freq:f});
         }
       }
     }
 
     async function initMic(){
       if (audioCtx) return;
-      try {
+      try{
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         if (audioCtx.state !== 'running') await audioCtx.resume();
+
         setStatus('Requesting mic…');
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         source = audioCtx.createMediaStreamSource(stream);
 
-        preGain = audioCtx.createGain();
-        preGain.gain.value = PREGAIN_DB;
+        preGainNode = audioCtx.createGain();
+        preGainNode.gain.value = PREGAIN;
 
         analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 4096;
+        analyser.fftSize = 4096;             // μεγαλύτερο FFT για χαμηλές
         tmpBuffer = new Float32Array(analyser.fftSize);
+        dataBuf   = new Float32Array(2048);  // παράθυρο προς YIN
 
-        dataArray = new Float32Array(DETECTOR_SIZE);
-        source.connect(preGain);
-        preGain.connect(analyser);
+        source.connect(preGainNode);
+        preGainNode.connect(analyser);
 
-        detector = PitchDetector.forFloat32Array(DETECTOR_SIZE);
         setStatus('Mic ready. Listening…', 'ok');
-      } catch (err) {
-        console.error(err);
-        setStatus('Mic access denied/failed. Check Site Permissions (lock icon) → Microphone: Allow.', 'error');
-        throw err;
+      }catch(e){
+        console.error(e);
+        setStatus('Mic access denied/failed. Check site permissions (lock icon) → Microphone: Allow.', 'error');
+        throw e;
       }
     }
-
-    function midiFromFreq(f){ return 69 + 12 * Math.log2(f/440); }
-    function freqFromMidi(m){ return 440 * Math.pow(2, (m-69)/12); }
-    function noteIndexFromMidi(m){ return ((Math.round(m) - 12) % 12 + 12) % 12; }
 
     function startGame(){
       buildFretboard(instrumentSel.value);
@@ -221,20 +225,28 @@
 
     function sampleAndJudge(){
       if (!gameActive || paused) return;
+
       analyser.getFloatTimeDomainData(tmpBuffer);
-      const start = Math.floor((tmpBuffer.length - DETECTOR_SIZE)/2);
-      for (let i=0;i<DETECTOR_SIZE;i++) dataArray[i] = tmpBuffer[start + i];
+      // κόψιμο κεντρικού παραθύρου 2048 δειγμάτων για πιο σταθερή YIN
+      const start = Math.floor((tmpBuffer.length - dataBuf.length)/2);
+      for (let i=0;i<dataBuf.length;i++) dataBuf[i] = tmpBuffer[start + i];
 
-      const out = detector.findPitch(dataArray, audioCtx.sampleRate);
-      if (!out || !out.length) return;
-      const pitch = out[0], clarity = out[1];
-      if (!pitch || !isFinite(pitch) || clarity < 0.6) return;
+      // high-pass φτωχό για DC/rumble
+      let prev = dataBuf[0];
+      for (let i=1;i<dataBuf.length;i++){
+        const cur = dataBuf[i];
+        dataBuf[i] = cur - 0.995*prev;
+        prev = cur;
+      }
 
-      const playedMidi = Math.round(midiFromFreq(pitch));
+      const [pitch, prob] = yinPitch(dataBuf, audioCtx.sampleRate);
+      if (!pitch || !isFinite(pitch) || prob < CLARITY_MIN) return;
+
+      const playedMidi        = Math.round(midiFromFreq(pitch));
       const playedFreqNearest = freqFromMidi(playedMidi);
-      const playedIndex = noteIndexFromMidi(playedMidi);
-      const targetIndex = noteNames.indexOf(target.note);
-      const centsErr = 1200 * Math.log2(pitch / playedFreqNearest);
+      const playedIndex       = noteIndexFromMidi(playedMidi);
+      const targetIndex       = noteNames.indexOf(target.note);
+      const centsErr          = 1200 * Math.log2(pitch / playedFreqNearest);
 
       if (playedIndex === targetIndex && Math.abs(centsErr) <= TOL_CENTS){
         score++;
@@ -284,7 +296,9 @@
     // Bind buttons
     document.getElementById('startBtn').addEventListener('click', startGame);
     document.getElementById('pauseBtn').addEventListener('click', togglePause);
-  }
+
+    // initial status
+    setStatus('Ready. Click Start Game and allow the mic.', 'ok');
   </script>
 </body>
 </html>
