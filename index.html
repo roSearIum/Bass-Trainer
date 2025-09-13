@@ -62,29 +62,16 @@
   <div id="score"></div>
   <div id="status" class="status"></div>
 
-  <!-- Main app (no inline handlers; buttons bound via addEventListener) -->
-  <script type="module">
-    const statusEl = document.getElementById('status');
+  <!-- Load Pitchy as global -->
+  <script src="https://cdn.jsdelivr.net/npm/pitchy@4.0.1/dist/pitchy.umd.js"></script>
 
-    // Dynamically import Pitchy and start app
-    let PitchDetector;
-    try {
-      ({ PitchDetector } = await import('https://cdn.jsdelivr.net/npm/pitchy@4.0.1/dist/pitchy.esm.js'));
-      statusEl.innerText = 'Pitchy loaded.';
-      statusEl.classList.add('ok');
-    } catch (e) {
-      statusEl.innerText = 'Error: Could not load Pitchy. Check your connection or CDN.';
-      statusEl.classList.add('error');
-      console.error(e);
-      // Do not proceed without pitchy
-      throw e;
-    }
+  <script>
+    const { PitchDetector } = window.pitchy;
 
-    // ---------- App Code ----------
     const noteNames = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
-    const TOL_CENTS   = 35;   // ±35 cents
-    const PREGAIN_DB  = 2.0;  // ~ +6dB analysis gain
-    const CLARITY_MIN = 0.6;  // accept a bit noisier frames
+    const TOL_CENTS   = 35;
+    const PREGAIN_DB  = 2.0;
+    const CLARITY_MIN = 0.6;
     const DETECTOR_SIZE = 2048;
 
     const instrumentSel = document.getElementById('instrument');
@@ -97,13 +84,14 @@
     const scoreEl  = document.getElementById('score');
     const timerEl  = document.getElementById('timer');
     const barEl    = document.getElementById('progressBar');
+    const statusEl = document.getElementById('status');
 
     let fretboard = [];
     let audioCtx, analyser, dataArray, source, detector, preGain;
     let target = null, round = 0, score = 0;
     let paused = false, gameActive = false, timeoutHandle = null, timerInterval = null, pollHandle = null;
     let timeLeft = 0, totalTime = 0;
-    let tmpBuffer; // analyser buffer
+    let tmpBuffer;
 
     function buildFretboard(type){
       const strings = (type==="5")
@@ -130,7 +118,7 @@
         preGain.gain.value = PREGAIN_DB;
 
         analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 4096; // better for lows
+        analyser.fftSize = 4096;
         tmpBuffer = new Float32Array(analyser.fftSize);
 
         dataArray = new Float32Array(DETECTOR_SIZE);
@@ -157,7 +145,7 @@
       buildFretboard(instrumentSel.value);
       score = 0; round = 0; gameActive = true; paused = false;
       scoreEl.innerText = `Score: 0 / 0`;
-      initMic().then(nextRound).catch(()=>{ /* already messaged */ });
+      initMic().then(nextRound);
     }
 
     function nextRound(){
@@ -211,7 +199,6 @@
 
     function sampleAndJudge(){
       if (!gameActive || paused) return;
-
       analyser.getFloatTimeDomainData(tmpBuffer);
       const start = Math.floor((tmpBuffer.length - DETECTOR_SIZE)/2);
       for (let i=0;i<DETECTOR_SIZE;i++) dataArray[i] = tmpBuffer[start + i];
@@ -269,7 +256,7 @@
       osc.stop(ctx.currentTime + 0.15);
     }
 
-    // Bind buttons AFTER script loads (no inline handlers)
+    // Button bindings
     startBtn.addEventListener('click', startGame);
     pauseBtn.addEventListener('click', togglePause);
   </script>
