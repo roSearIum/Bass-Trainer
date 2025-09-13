@@ -16,6 +16,7 @@
   <div>
     Difficulty: 
     <select id="difficulty">
+      <option value="10000">Very Easy (10s)</option>
       <option value="6000">Easy (6s)</option>
       <option value="4000">Intermediate (4s)</option>
       <option value="3000" selected>Advanced (3s)</option>
@@ -110,7 +111,7 @@
       }
       target = fretboard[Math.floor(Math.random()*fretboard.length)];
       round++;
-      document.getElementById("note").innerText = `${target.note} on ${target.string} string (fret ${target.fret})`;
+      document.getElementById("note").innerText = `${target.note} on ${target.string} string`;
       document.getElementById("result").innerText = "Play now!";
       
       let limit = parseInt(document.getElementById("difficulty").value);
@@ -139,7 +140,10 @@
         }
       }
       document.getElementById("score").innerText = `Score: ${score} / ${round}`;
-      setTimeout(nextRound,1000);
+      
+      // Παύση + ήχος πριν την επόμενη ερώτηση
+      playBeep();
+      setTimeout(nextRound,1500);
     }
 
     function togglePause(){
@@ -151,6 +155,20 @@
         document.getElementById("result").innerText="▶ Resumed";
         setTimeout(nextRound,1000);
       }
+    }
+
+    // Μικρό "τιν" beep
+    function playBeep(){
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = "sine";
+      osc.frequency.value = 880; // 880Hz -> τσιριχτό "τιν"
+      gain.gain.setValueAtTime(0.1, ctx.currentTime);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.15);
     }
   </script>
 </body>
