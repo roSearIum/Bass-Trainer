@@ -55,26 +55,24 @@
   <div id="status" class="status"></div>
 
   <script>
-    // ------------------ Utility / Constants ------------------
+    // ======= Constants & Utils =======
     const noteNames = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
-    const TOL_CENTS = 35;    // ±35 cents (= ~1/3 ημιτόνιο)
-    const PREGAIN   = 2.5;   // προενίσχυση ανάλυσης (~+8 dB)
-    const CLARITY_MIN = 0.6; // κατώφλι αξιοπιστίας για YIN
+    const TOL_BASE_CENTS = 35;   // βάση ανοχής
+    const TOL_LOW_BONUS  = 10;   // +cents για στόχους σε B/E
+    const PREGAIN   = 3.0;       // ×3 προενίσχυση ανάλυσης
+    const CLARITY_MIN = 0.6;
 
     function midiFromFreq(f){ return 69 + 12 * Math.log2(f/440); }
     function freqFromMidi(m){ return 440 * Math.pow(2, (m-69)/12); }
     function noteIndexFromMidi(m){ return ((Math.round(m) - 12) % 12 + 12) % 12; }
 
-    // ------------------ Lightweight YIN Pitch Detector ------------------
-    // Επιστρέφει [pitchHz | null, probability 0..1]
+    // ======= Lightweight YIN (τοπικό, χωρίς CDN) =======
     function yinPitch(buffer, sampleRate){
-      // Βασισμένο σε YIN (AMDF + cumulative mean normalized difference)
       const n = buffer.length;
       const tauMax = Math.floor(n/2);
       const yin = new Float32Array(tauMax);
       let runningSum = 0;
 
-      // Difference function d(tau)
       for (let tau=1; tau<tauMax; tau++){
         let sum = 0;
         for (let i=0; i<tauMax; i++){
@@ -83,31 +81,30 @@
         }
         yin[tau] = sum;
       }
-      // Cumulative mean normalized difference CMND
       yin[0] = 1;
       for (let tau=1; tau<tauMax; tau++){
         runningSum += yin[tau];
-        yin[tau] = (runningSum ? yin[tau] * tau / runningSum : 1);
+        yin[tau] = runningSum ? (yin[tau] * tau / runningSum) : 1;
       }
-      // Absolute threshold
+
       let tau = 2;
+      const thresh = (1 - CLARITY_MIN);
       for (; tau<tauMax; tau++){
-        if (yin[tau] < (1 - CLARITY_MIN)) break; // όσο μεγαλύτερο clarity, τόσο μικρότερο κατώφλι
+        if (yin[tau] < thresh) break;
       }
       if (tau === tauMax) return [null, 0];
 
-      // Parabolic interpolation για πιο ακριβές τ
       let x0 = (tau < 1) ? tau : tau-1;
       let x2 = (tau+1 < tauMax) ? tau+1 : tau;
       const s0 = yin[x0], s1 = yin[tau], s2 = yin[x2];
       const betterTau = (x0===tau || x2===tau) ? tau : tau + (s2 - s0) / (2*(2*s1 - s2 - s0));
 
       const pitch = sampleRate / betterTau;
-      const probability = 1 - s1; // πρόχειρη εκτίμηση αξιοπιστίας
+      const probability = 1 - s1;
       return [pitch, probability];
     }
 
-    // ------------------ App State ------------------
+    // ======= App State =======
     const instrumentSel= document.getElementById('instrument');
     const difficultySel= document.getElementById('difficulty');
     const startBtn     = document.getElementById('startBtn');
@@ -119,10 +116,14 @@
     const barEl        = document.getElementById('progressBar');
     const statusEl     = document.getElementById('status');
 
-    let fretboard=[], audioCtx, analyser, dataBuf, source, preGainNode;
+    let fretboard=[], audioCtx, analyser, dataBuf, source, preGainNode, hp, lp;
     let target=null, round=0, score=0;
     let paused=false, gameActive=false, timeoutHandle=null, timerInterval=null, pollHandle=null;
     let timeLeft=0, totalTime=0, tmpBuffer;
+
+    // σταθερότητα: χρειάζονται 3 συνεχόμενες συμφωνίες
+    const agreeBuffer = [];
+    const AGREE_NEED  = 3;
 
     function setStatus(msg, cls){
       statusEl.className = 'status' + (cls ? ' ' + cls : '');
@@ -153,16 +154,28 @@
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         source = audioCtx.createMediaStreamSource(stream);
 
+        // Gain -> HighPass -> LowPass -> Analyser
         preGainNode = audioCtx.createGain();
         preGainNode.gain.value = PREGAIN;
 
-        analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 4096;             // μεγαλύτερο FFT για χαμηλές
-        tmpBuffer = new Float32Array(analyser.fftSize);
-        dataBuf   = new Float32Array(2048);  // παράθυρο προς YIN
+        hp = audioCtx.createBiquadFilter();
+        hp.type = 'highpass';
+        hp.frequency.value = 35;  // κόψε DC/rumble
 
+        lp = audioCtx.createBiquadFilter();
+        lp.type = 'lowpass';
+        lp.frequency.value = 1200; // κόψε άχρηστα πολύ υψηλά
+
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 8192;             // πιο σταθερό στα χαμηλά
+        tmpBuffer = new Float32Array(analyser.fftSize);
+        dataBuf   = new Float32Array(4096);  // παράθυρο προς YIN
+
+        // chain
         source.connect(preGainNode);
-        preGainNode.connect(analyser);
+        preGainNode.connect(hp);
+        hp.connect(lp);
+        lp.connect(analyser);
 
         setStatus('Mic ready. Listening…', 'ok');
       }catch(e){
@@ -175,6 +188,7 @@
     function startGame(){
       buildFretboard(instrumentSel.value);
       score = 0; round = 0; gameActive = true; paused = false;
+      agreeBuffer.length = 0;
       scoreEl.innerText = `Score: 0 / 0`;
       initMic().then(nextRound);
     }
@@ -192,6 +206,7 @@
       }
       target = fretboard[Math.floor(Math.random()*fretboard.length)];
       round++;
+      agreeBuffer.length = 0; // reset σταθερότητας
       noteEl.innerText   = `${target.note} on ${target.string}`;
       resultEl.innerText = "Play now!";
 
@@ -223,15 +238,32 @@
     function startPolling(){ stopPolling(); pollHandle = setInterval(sampleAndJudge, 120); }
     function stopPolling(){ if (pollHandle){ clearInterval(pollHandle); pollHandle=null; } }
 
+    function bestOctaveFit(pitchHz){
+      // Δοκίμασε pitch και 2×pitch (για να «σώσεις» χαμηλές που διαβάζονται σε ανώτερη οκτάβα)
+      const candidates = [pitchHz, pitchHz*2];
+      let best = null;
+      for (const p of candidates){
+        const playedMidi = Math.round(midiFromFreq(p));
+        const playedFreqNearest = freqFromMidi(playedMidi);
+        const centsErr = 1200 * Math.log2(p / playedFreqNearest);
+        const idx = noteIndexFromMidi(playedMidi);
+        const absErr = Math.abs(centsErr);
+        if (!best || absErr < best.absErr){
+          best = { idx, centsErr, absErr, pitch: p };
+        }
+      }
+      return best; // {idx, centsErr, absErr, pitch}
+    }
+
     function sampleAndJudge(){
       if (!gameActive || paused) return;
 
       analyser.getFloatTimeDomainData(tmpBuffer);
-      // κόψιμο κεντρικού παραθύρου 2048 δειγμάτων για πιο σταθερή YIN
+      // πάρε κεντρικό παράθυρο προς YIN
       const start = Math.floor((tmpBuffer.length - dataBuf.length)/2);
       for (let i=0;i<dataBuf.length;i++) dataBuf[i] = tmpBuffer[start + i];
 
-      // high-pass φτωχό για DC/rumble
+      // απλό high-pass σε δείγματα (πέρα από το biquad) για ασφάλεια
       let prev = dataBuf[0];
       for (let i=1;i<dataBuf.length;i++){
         const cur = dataBuf[i];
@@ -239,26 +271,33 @@
         prev = cur;
       }
 
-      const [pitch, prob] = yinPitch(dataBuf, audioCtx.sampleRate);
-      if (!pitch || !isFinite(pitch) || prob < CLARITY_MIN) return;
+      const [rawPitch, prob] = yinPitch(dataBuf, audioCtx.sampleRate);
+      if (!rawPitch || !isFinite(rawPitch) || prob < CLARITY_MIN) return;
 
-      const playedMidi        = Math.round(midiFromFreq(pitch));
-      const playedFreqNearest = freqFromMidi(playedMidi);
-      const playedIndex       = noteIndexFromMidi(playedMidi);
-      const targetIndex       = noteNames.indexOf(target.note);
-      const centsErr          = 1200 * Math.log2(pitch / playedFreqNearest);
+      const fit = bestOctaveFit(rawPitch);
+      const targetIndex = noteNames.indexOf(target.note);
 
-      if (playedIndex === targetIndex && Math.abs(centsErr) <= TOL_CENTS){
+      // δυναμική ανοχή: extra για B/E στόχους
+      const tol = TOL_BASE_CENTS + ( (target.string === 'B' || target.string === 'E') ? TOL_LOW_BONUS : 0 );
+
+      const ok = (fit.idx === targetIndex) && (Math.abs(fit.centsErr) <= tol);
+
+      // Σταθερότητα: χρειάζομαι 3 διαδοχικές συμφωνίες
+      agreeBuffer.push(ok);
+      if (agreeBuffer.length > AGREE_NEED) agreeBuffer.shift();
+
+      if (ok && agreeBuffer.length === AGREE_NEED && agreeBuffer.every(Boolean)){
         score++;
-        resultEl.innerText = `✅ Correct! ${target.note} (~${pitch.toFixed(1)} Hz)`;
+        resultEl.innerText = `✅ Correct! ${target.note} (~${fit.pitch.toFixed(1)} Hz)`;
         scoreEl.innerText  = `Score: ${score} / ${round}`;
         playBeep("correct");
         clearTimeout(timeoutHandle);
         clearInterval(timerInterval);
         stopPolling();
         setTimeout(nextRound, 400);
-      } else {
-        resultEl.innerText = `❌ Wrong (~${noteNames[playedIndex]} • ${pitch.toFixed(1)} Hz). Target: ${target.note}`;
+      } else if (!ok) {
+        const name = noteNames[fit.idx];
+        resultEl.innerText = `❌ Wrong (~${name} • ${fit.pitch.toFixed(1)} Hz). Target: ${target.note}`;
         if (!sampleAndJudge._lastWrong || performance.now() - sampleAndJudge._lastWrong > 900) {
           playBeep("wrong");
           sampleAndJudge._lastWrong = performance.now();
@@ -297,7 +336,6 @@
     document.getElementById('startBtn').addEventListener('click', startGame);
     document.getElementById('pauseBtn').addEventListener('click', togglePause);
 
-    // initial status
     setStatus('Ready. Click Start Game and allow the mic.', 'ok');
   </script>
 </body>
