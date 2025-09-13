@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
+  <meta charset="UTF-8" />
   <title>Bassist's Game</title>
   <style>
     body { font-family: Arial, sans-serif; text-align:center; margin:0; padding:30px 10px; background:#000; color:#fff; }
@@ -54,35 +54,58 @@
   <div id="score"></div>
   <div id="status" class="status"></div>
 
-  <!-- Load Pitchy as global (UMD) -->
-  <script src="https://cdn.jsdelivr.net/npm/pitchy@4.0.1/dist/pitchy.umd.js" crossorigin="anonymous"></script>
-
+  <!-- Loader που δοκιμάζει 2 CDNs για την Pitchy -->
   <script>
-  (function(){
-    const { PitchDetector } = window.pitchy || {};
+    function loadScript(urls, onOk, onFail){
+      const tryNext = (i) => {
+        if (i >= urls.length) { onFail && onFail(); return; }
+        const s = document.createElement('script');
+        s.src = urls[i];
+        s.async = true;
+        s.onload = () => onOk && onOk();
+        s.onerror = () => tryNext(i+1);
+        document.head.appendChild(s);
+      };
+      tryNext(0);
+    }
+  </script>
+  <script>
     const statusEl = document.getElementById('status');
-
     function setStatus(msg, cls){
-      statusEl.classList.remove('ok','error');
-      if (cls) statusEl.classList.add(cls);
+      statusEl.className = 'status' + (cls ? ' ' + cls : '');
       statusEl.textContent = msg;
     }
+    setStatus('Loading Pitchy…');
 
-    if (!PitchDetector){
-      setStatus('Error: Could not load Pitchy (CDN). Try hard refresh or another network.', 'error');
-      return;
-    } else {
-      setStatus('Pitchy loaded. Click Start Game and allow the mic.', 'ok');
-    }
+    // jsDelivr -> unpkg fallback
+    loadScript(
+      [
+        'https://cdn.jsdelivr.net/npm/pitchy@4.0.1/dist/pitchy.umd.js',
+        'https://unpkg.com/pitchy@4.0.1/dist/pitchy.umd.js'
+      ],
+      () => {
+        if (!window.pitchy || !window.pitchy.PitchDetector){
+          setStatus('Pitchy loaded but not available. Try refresh.', 'error');
+          return;
+        }
+        setStatus('Pitchy loaded. Click Start Game and allow the mic.', 'ok');
+        startApp();
+      },
+      () => setStatus('Error: Could not load Pitchy from any CDN.', 'error')
+    );
+  </script>
 
-    // ---- Constants ----
+  <!-- Κύριο app -->
+  <script>
+  function startApp(){
+    const { PitchDetector } = window.pitchy;
+
     const noteNames    = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
     const TOL_CENTS    = 35;
-    const PREGAIN_DB   = 2.5;  // λίγο παραπάνω gain
+    const PREGAIN_DB   = 2.5;
     const CLARITY_MIN  = 0.6;
     const DETECTOR_SIZE= 2048;
 
-    // ---- UI refs ----
     const instrumentSel= document.getElementById('instrument');
     const difficultySel= document.getElementById('difficulty');
     const startBtn     = document.getElementById('startBtn');
@@ -93,7 +116,6 @@
     const timerEl      = document.getElementById('timer');
     const barEl        = document.getElementById('progressBar');
 
-    // ---- Audio & game state ----
     let fretboard=[], audioCtx, analyser, dataArray, source, detector, preGain;
     let target=null, round=0, score=0;
     let paused=false, gameActive=false, timeoutHandle=null, timerInterval=null, pollHandle=null;
@@ -117,13 +139,8 @@
       if (audioCtx) return;
       try {
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-
-        // Force resume on user gesture (Firefox/Autoplay policies)
-        if (audioCtx.state !== 'running'){
-          await audioCtx.resume();
-        }
-
-        setStatus('Requesting mic…', null);
+        if (audioCtx.state !== 'running') await audioCtx.resume();
+        setStatus('Requesting mic…');
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         source = audioCtx.createMediaStreamSource(stream);
 
@@ -131,7 +148,7 @@
         preGain.gain.value = PREGAIN_DB;
 
         analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 4096; // καλύτερο για χαμηλές
+        analyser.fftSize = 4096;
         tmpBuffer = new Float32Array(analyser.fftSize);
 
         dataArray = new Float32Array(DETECTOR_SIZE);
@@ -139,7 +156,6 @@
         preGain.connect(analyser);
 
         detector = PitchDetector.forFloat32Array(DETECTOR_SIZE);
-
         setStatus('Mic ready. Listening…', 'ok');
       } catch (err) {
         console.error(err);
@@ -156,7 +172,7 @@
       buildFretboard(instrumentSel.value);
       score = 0; round = 0; gameActive = true; paused = false;
       scoreEl.innerText = `Score: 0 / 0`;
-      initMic().then(nextRound).catch(()=>{});
+      initMic().then(nextRound);
     }
 
     function nextRound(){
@@ -200,49 +216,41 @@
       startPolling();
     }
 
-    function startPolling(){
-      stopPolling();
-      pollHandle = setInterval(sampleAndJudge, 120);
-    }
-    function stopPolling(){
-      if (pollHandle){ clearInterval(pollHandle); pollHandle=null; }
-    }
+    function startPolling(){ stopPolling(); pollHandle = setInterval(sampleAndJudge, 120); }
+    function stopPolling(){ if (pollHandle){ clearInterval(pollHandle); pollHandle=null; } }
 
     function sampleAndJudge(){
       if (!gameActive || paused) return;
-      try {
-        analyser.getFloatTimeDomainData(tmpBuffer);
-        const start = Math.floor((tmpBuffer.length - DETECTOR_SIZE)/2);
-        for (let i=0;i<DETECTOR_SIZE;i++) dataArray[i] = tmpBuffer[start + i];
+      analyser.getFloatTimeDomainData(tmpBuffer);
+      const start = Math.floor((tmpBuffer.length - DETECTOR_SIZE)/2);
+      for (let i=0;i<DETECTOR_SIZE;i++) dataArray[i] = tmpBuffer[start + i];
 
-        const [pitch, clarity] = detector.findPitch(dataArray, audioCtx.sampleRate);
-        if (!pitch || !isFinite(pitch) || clarity < CLARITY_MIN) return;
+      const out = detector.findPitch(dataArray, audioCtx.sampleRate);
+      if (!out || !out.length) return;
+      const pitch = out[0], clarity = out[1];
+      if (!pitch || !isFinite(pitch) || clarity < 0.6) return;
 
-        const playedMidi = Math.round(midiFromFreq(pitch));
-        const playedFreqNearest = freqFromMidi(playedMidi);
-        const playedIndex = noteIndexFromMidi(playedMidi);
-        const targetIndex = noteNames.indexOf(target.note);
-        const centsErr = 1200 * Math.log2(pitch / playedFreqNearest);
+      const playedMidi = Math.round(midiFromFreq(pitch));
+      const playedFreqNearest = freqFromMidi(playedMidi);
+      const playedIndex = noteIndexFromMidi(playedMidi);
+      const targetIndex = noteNames.indexOf(target.note);
+      const centsErr = 1200 * Math.log2(pitch / playedFreqNearest);
 
-        if (playedIndex === targetIndex && Math.abs(centsErr) <= TOL_CENTS){
-          score++;
-          resultEl.innerText = `✅ Correct! ${target.note} (~${pitch.toFixed(1)} Hz)`;
-          scoreEl.innerText  = `Score: ${score} / ${round}`;
-          playBeep("correct");
-          clearTimeout(timeoutHandle);
-          clearInterval(timerInterval);
-          stopPolling();
-          setTimeout(nextRound, 400);
-        } else {
-          resultEl.innerText = `❌ Wrong (~${noteNames[playedIndex]} • ${pitch.toFixed(1)} Hz). Target: ${target.note}`;
-          if (!sampleAndJudge._lastWrong || performance.now() - sampleAndJudge._lastWrong > 900) {
-            playBeep("wrong");
-            sampleAndJudge._lastWrong = performance.now();
-          }
+      if (playedIndex === targetIndex && Math.abs(centsErr) <= TOL_CENTS){
+        score++;
+        resultEl.innerText = `✅ Correct! ${target.note} (~${pitch.toFixed(1)} Hz)`;
+        scoreEl.innerText  = `Score: ${score} / ${round}`;
+        playBeep("correct");
+        clearTimeout(timeoutHandle);
+        clearInterval(timerInterval);
+        stopPolling();
+        setTimeout(nextRound, 400);
+      } else {
+        resultEl.innerText = `❌ Wrong (~${noteNames[playedIndex]} • ${pitch.toFixed(1)} Hz). Target: ${target.note}`;
+        if (!sampleAndJudge._lastWrong || performance.now() - sampleAndJudge._lastWrong > 900) {
+          playBeep("wrong");
+          sampleAndJudge._lastWrong = performance.now();
         }
-      } catch(e){
-        console.error(e);
-        setStatus('Runtime error in detection. Try refresh or change mic.', 'error');
       }
     }
 
@@ -273,11 +281,10 @@
       }catch(_){}
     }
 
-    // Bind buttons (αν ξανατρέξει το script δεν θα διπλοδέσει)
-    startBtn.onclick = startGame;
-    pauseBtn.onclick = togglePause;
-
-  })();
+    // Bind buttons
+    document.getElementById('startBtn').addEventListener('click', startGame);
+    document.getElementById('pauseBtn').addEventListener('click', togglePause);
+  }
   </script>
 </body>
 </html>
