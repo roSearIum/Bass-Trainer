@@ -19,7 +19,7 @@
   <h1>Bassist's Game</h1>
 
   <div>
-    Instrument: 
+    Instrument:
     <select id="instrument">
       <option value="4">Bass 4 Strings (EADG)</option>
       <option value="5" selected>Bass 5 Strings (BEADG)</option>
@@ -27,7 +27,7 @@
   </div>
 
   <div>
-    Difficulty: 
+    Difficulty:
     <select id="difficulty">
       <option value="10000">Very Easy (10s)</option>
       <option value="6000">Easy (6s)</option>
@@ -46,12 +46,17 @@
   <button onclick="startGame()">Start Game</button>
   <button onclick="togglePause()">Pause / Resume</button>
 
-  <script>
+  <!-- Pitchy (ESM) -->
+  <script type="module">
+    import { PitchDetector } from 'https://cdn.jsdelivr.net/npm/pitchy@4.0.1/dist/pitchy.esm.js';
+
     const noteNames = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+    const TOL_CENTS = 35; // ~±35 cents tolerance
+
     let fretboard = [];
-    let audioCtx, analyser, dataArray, source;
+    let audioCtx, analyser, dataArray, source, detector;
     let target = null, round = 0, score = 0;
-    let paused = false, gameActive = false, timeoutHandle = null, timerInterval = null;
+    let paused = false, gameActive = false, timeoutHandle = null, timerInterval = null, pollHandle = null;
     let timeLeft = 0, totalTime = 0;
 
     function buildFretboard(type){
@@ -61,8 +66,8 @@
       fretboard = [];
       for (let s of strings){
         for (let fret=0; fret<=12; fret++){
-          let freq = s.freq * Math.pow(2, fret/12);
-          let n = noteNames[Math.round(12 * Math.log2(freq/16.35)) % 12];
+          const freq = s.freq * Math.pow(2, fret/12);
+          const n = noteNames[Math.round(12 * Math.log2(freq/16.35)) % 12];
           fretboard.push({string:s.name, fret:fret, note:n, freq:freq});
         }
       }
@@ -71,40 +76,27 @@
     async function initMic(){
       if(!audioCtx){
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        let stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         source = audioCtx.createMediaStreamSource(stream);
         analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 2048;
-        dataArray = new Float32Array(analyser.fftSize);
+        analyser.fftSize = 2048; // enough for Pitchy buffer
+        dataArray = new Float32Array(1024); // detector window
         source.connect(analyser);
+        detector = PitchDetector.forFloat32Array(1024);
       }
     }
 
-    function autoCorrelate(buf, sampleRate) {
-      let SIZE = buf.length, rms = 0;
-      for (let i=0;i<SIZE;i++) rms += buf[i]*buf[i];
-      rms = Math.sqrt(rms/SIZE);
-      if (rms<0.01) return -1;
-      let r1=0,r2=SIZE-1,thres=0.2;
-      for (let i=0;i<SIZE/2;i++) if (Math.abs(buf[i])<thres) { r1=i; break;}
-      for (let i=1;i<SIZE/2;i++) if (Math.abs(buf[SIZE-i])<thres) { r2=SIZE-i; break;}
-      buf = buf.slice(r1,r2);
-      SIZE = buf.length;
-      let c = new Array(SIZE).fill(0);
-      for (let i=0;i<SIZE;i++) for (let j=0;j<SIZE-i;j++) c[i]+=buf[j]*buf[j+i];
-      let d=0; while (c[d]>c[d+1]) d++;
-      let maxval=-1, maxpos=-1;
-      for (let i=d;i<SIZE;i++){ if (c[i]>maxval){ maxval=c[i]; maxpos=i;}}
-      let T0=maxpos;
-      return sampleRate/T0;
+    function midiFromFreq(f){ return 69 + 12 * Math.log2(f/440); }
+    function freqFromMidi(m){ return 440 * Math.pow(2, (m-69)/12); }
+    function noteIndexFromMidi(m){ // 0=C ... 11=B
+      return ((Math.round(m) - 12) % 12 + 12) % 12;
     }
 
-    async function startGame(){
+    function startGame(){
       buildFretboard(document.getElementById("instrument").value);
       score = 0; round = 0; gameActive = true; paused = false;
       document.getElementById("score").innerText = `Score: 0 / 0`;
-      await initMic();
-      nextRound();
+      initMic().then(nextRound);
     }
 
     function nextRound(){
@@ -114,6 +106,7 @@
         document.getElementById("result").innerText=`Final Score: ${score} / ${round}`;
         document.getElementById("timer").innerText="";
         document.getElementById("progressBar").style.width="0%";
+        stopPolling();
         gameActive = false;
         return;
       }
@@ -121,12 +114,12 @@
       round++;
       document.getElementById("note").innerText = `${target.note} on ${target.string} string`;
       document.getElementById("result").innerText = "Play now!";
-      
+
       totalTime = parseInt(document.getElementById("difficulty").value);
       timeLeft = totalTime/1000;
       document.getElementById("timer").innerText = `Time left: ${timeLeft}s`;
       document.getElementById("progressBar").style.width="100%";
-      
+
       clearInterval(timerInterval);
       timerInterval = setInterval(()=>{
         timeLeft -= 1;
@@ -140,36 +133,62 @@
       timeoutHandle = setTimeout(()=>{
         document.getElementById("result").innerText="⏰ Timeout / No sound";
         playBeep("wrong");
+        stopPolling();
         setTimeout(nextRound,1000);
       }, totalTime);
+
+      startPolling();
     }
 
-    function checkNote(){
+    function startPolling(){
+      stopPolling();
+      pollHandle = setInterval(sampleAndJudge, 120); // ~8x/sec
+    }
+    function stopPolling(){
+      if (pollHandle){ clearInterval(pollHandle); pollHandle=null; }
+    }
+
+    function sampleAndJudge(){
       if (!gameActive || paused) return;
-      analyser.getFloatTimeDomainData(dataArray);
-      let pitch = autoCorrelate(dataArray,audioCtx.sampleRate);
-      if (pitch==-1) return;
+      // pull 1024 samples
+      const tmp = new Float32Array(analyser.fftSize);
+      analyser.getFloatTimeDomainData(tmp);
+      // center-cut to 1024 window for detector
+      for (let i=0;i<1024;i++) dataArray[i] = tmp[i];
 
-      let closest = null, minDiff=1e9;
-      for (let fb of fretboard){
-        let diff = Math.abs(fb.freq - pitch);
-        if (diff<minDiff){ minDiff=diff; closest=fb; }
-      }
-      let played = closest.note;
-      let targetNote = target.note;
-      let diffFromTarget = Math.abs(target.freq - pitch);
+      const [pitch, clarity] = detector.findPitch(dataArray, audioCtx.sampleRate);
+      if (!pitch || !isFinite(pitch) || clarity < 0.7) return; // ignore noisy frames
 
-      if (played===targetNote && diffFromTarget <= 10){
+      // nearest semitone to the played pitch
+      const playedMidi = Math.round(midiFromFreq(pitch));
+      const playedFreqNearest = freqFromMidi(playedMidi);
+      const playedIndex = noteIndexFromMidi(playedMidi);
+
+      // target note index (octave-insensitive)
+      const targetIndex = noteNames.indexOf(target.note);
+
+      // cents error to nearest semitone
+      const centsErr = 1200 * Math.log2(pitch / playedFreqNearest);
+
+      if (playedIndex === targetIndex && Math.abs(centsErr) <= TOL_CENTS){
+        // CORRECT: instant beep + next question
         score++;
-        document.getElementById("result").innerText=`✅ Correct! ${played} (${pitch.toFixed(1)} Hz)`;
+        document.getElementById("result").innerText = `✅ Correct! ${target.note} (~${pitch.toFixed(1)} Hz)`;
         document.getElementById("score").innerText = `Score: ${score} / ${round}`;
         playBeep("correct");
         clearTimeout(timeoutHandle);
         clearInterval(timerInterval);
-        setTimeout(nextRound,500);
+        stopPolling();
+        setTimeout(nextRound, 400);
       } else {
-        document.getElementById("result").innerText=`❌ Wrong: ~${played} (${pitch.toFixed(1)} Hz), target ${targetNote}`;
-        playBeep("wrong");
+        // WRONG so far — give feedback but DO NOT advance; player can try again until timeout
+        document.getElementById("result").innerText = `❌ Wrong (~${noteNames[playedIndex]} • ${pitch.toFixed(1)} Hz). Target: ${target.note}`;
+        // soft wrong beep (don’t spam every 120ms)
+        // Play once every ~900ms: simple throttle
+        if (!sampleAndJudge._lastWrong || performance.now() - sampleAndJudge._lastWrong > 900) {
+          playBeep("wrong");
+          sampleAndJudge._lastWrong = performance.now();
+        }
       }
     }
 
@@ -178,10 +197,11 @@
       if (paused){
         clearTimeout(timeoutHandle);
         clearInterval(timerInterval);
+        stopPolling();
         document.getElementById("result").innerText="⏸ Paused";
       } else {
         document.getElementById("result").innerText="▶ Resumed";
-        setTimeout(nextRound,1000);
+        setTimeout(nextRound,500);
       }
     }
 
@@ -193,13 +213,10 @@
       gain.connect(ctx.destination);
       osc.type = "sine";
       if (type==="correct"){ osc.frequency.value = 880; gain.gain.value = 0.1; }
-      else { osc.frequency.value = 220; gain.gain.value = 0.15; }
+      else { osc.frequency.value = 220; gain.gain.value = 0.12; }
       osc.start();
-      osc.stop(ctx.currentTime + 0.2);
+      osc.stop(ctx.currentTime + 0.15);
     }
-
-    // check input often
-    setInterval(()=>{ if(gameActive && !paused) checkNote(); },200);
   </script>
 </body>
 </html>
