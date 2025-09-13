@@ -4,26 +4,18 @@
   <meta charset="UTF-8">
   <title>Bassist's Game</title>
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      text-align:center;
-      margin:0; padding:30px 10px;
-      background:#000; color:#fff;
-    }
+    body { font-family: Arial, sans-serif; text-align:center; margin:0; padding:30px 10px; background:#000; color:#fff; }
     h1 { font-size: 42px; margin: 0 0 10px; }
     #note { font-size: 72px; margin:20px 0; color: #e74c3c; font-weight: 800; letter-spacing: 1px; }
     #result { font-size: 28px; margin:10px 0 6px; min-height: 34px; }
     #score { font-size: 22px; margin:16px 0; }
     #timer { font-size: 20px; color: #ffcc00; margin:6px 0 8px; min-height: 24px; }
     .controls { margin: 8px 0 14px; display:flex; gap:8px; justify-content:center; flex-wrap: wrap; }
-    select, button {
-      padding:10px 16px; font-size:18px; border-radius:8px; border:1px solid #333;
-      background:#111; color:#fff; cursor:pointer;
-    }
+    select, button { padding:10px 16px; font-size:18px; border-radius:8px; border:1px solid #333; background:#111; color:#fff; cursor:pointer; }
     button:hover, select:hover { background:#151515; }
     .progress-container { width: 320px; height: 20px; background: #333; margin: 10px auto; border-radius: 10px; overflow: hidden; }
     .progress-bar { height: 100%; background: #e74c3c; width: 100%; transition: width 1s linear; }
-    .status { font-size:14px; color:#aaa; margin-top:10px; min-height:18px; }
+    .status { font-size:14px; color:#aaa; margin-top:10px; min-height:18px; white-space:pre-line; }
     .error { color:#ff6b6b; }
     .ok    { color:#7fffd4; }
   </style>
@@ -62,36 +54,50 @@
   <div id="score"></div>
   <div id="status" class="status"></div>
 
-  <!-- Load Pitchy as global -->
-  <script src="https://cdn.jsdelivr.net/npm/pitchy@4.0.1/dist/pitchy.umd.js"></script>
+  <!-- Load Pitchy as global (UMD) -->
+  <script src="https://cdn.jsdelivr.net/npm/pitchy@4.0.1/dist/pitchy.umd.js" crossorigin="anonymous"></script>
 
   <script>
-    const { PitchDetector } = window.pitchy;
-
-    const noteNames = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
-    const TOL_CENTS   = 35;
-    const PREGAIN_DB  = 2.0;
-    const CLARITY_MIN = 0.6;
-    const DETECTOR_SIZE = 2048;
-
-    const instrumentSel = document.getElementById('instrument');
-    const difficultySel = document.getElementById('difficulty');
-    const startBtn = document.getElementById('startBtn');
-    const pauseBtn = document.getElementById('pauseBtn');
-
-    const noteEl   = document.getElementById('note');
-    const resultEl = document.getElementById('result');
-    const scoreEl  = document.getElementById('score');
-    const timerEl  = document.getElementById('timer');
-    const barEl    = document.getElementById('progressBar');
+  (function(){
+    const { PitchDetector } = window.pitchy || {};
     const statusEl = document.getElementById('status');
 
-    let fretboard = [];
-    let audioCtx, analyser, dataArray, source, detector, preGain;
-    let target = null, round = 0, score = 0;
-    let paused = false, gameActive = false, timeoutHandle = null, timerInterval = null, pollHandle = null;
-    let timeLeft = 0, totalTime = 0;
-    let tmpBuffer;
+    function setStatus(msg, cls){
+      statusEl.classList.remove('ok','error');
+      if (cls) statusEl.classList.add(cls);
+      statusEl.textContent = msg;
+    }
+
+    if (!PitchDetector){
+      setStatus('Error: Could not load Pitchy (CDN). Try hard refresh or another network.', 'error');
+      return;
+    } else {
+      setStatus('Pitchy loaded. Click Start Game and allow the mic.', 'ok');
+    }
+
+    // ---- Constants ----
+    const noteNames    = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+    const TOL_CENTS    = 35;
+    const PREGAIN_DB   = 2.5;  // λίγο παραπάνω gain
+    const CLARITY_MIN  = 0.6;
+    const DETECTOR_SIZE= 2048;
+
+    // ---- UI refs ----
+    const instrumentSel= document.getElementById('instrument');
+    const difficultySel= document.getElementById('difficulty');
+    const startBtn     = document.getElementById('startBtn');
+    const pauseBtn     = document.getElementById('pauseBtn');
+    const noteEl       = document.getElementById('note');
+    const resultEl     = document.getElementById('result');
+    const scoreEl      = document.getElementById('score');
+    const timerEl      = document.getElementById('timer');
+    const barEl        = document.getElementById('progressBar');
+
+    // ---- Audio & game state ----
+    let fretboard=[], audioCtx, analyser, dataArray, source, detector, preGain;
+    let target=null, round=0, score=0;
+    let paused=false, gameActive=false, timeoutHandle=null, timerInterval=null, pollHandle=null;
+    let timeLeft=0, totalTime=0, tmpBuffer;
 
     function buildFretboard(type){
       const strings = (type==="5")
@@ -111,6 +117,13 @@
       if (audioCtx) return;
       try {
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+        // Force resume on user gesture (Firefox/Autoplay policies)
+        if (audioCtx.state !== 'running'){
+          await audioCtx.resume();
+        }
+
+        setStatus('Requesting mic…', null);
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         source = audioCtx.createMediaStreamSource(stream);
 
@@ -118,7 +131,7 @@
         preGain.gain.value = PREGAIN_DB;
 
         analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 4096;
+        analyser.fftSize = 4096; // καλύτερο για χαμηλές
         tmpBuffer = new Float32Array(analyser.fftSize);
 
         dataArray = new Float32Array(DETECTOR_SIZE);
@@ -127,12 +140,10 @@
 
         detector = PitchDetector.forFloat32Array(DETECTOR_SIZE);
 
-        statusEl.innerText = 'Mic ready.';
-        statusEl.classList.add('ok');
+        setStatus('Mic ready. Listening…', 'ok');
       } catch (err) {
-        statusEl.innerText = 'Mic access denied or failed. Check browser permissions.';
-        statusEl.classList.add('error');
         console.error(err);
+        setStatus('Mic access denied/failed. Check Site Permissions (lock icon) → Microphone: Allow.', 'error');
         throw err;
       }
     }
@@ -145,7 +156,7 @@
       buildFretboard(instrumentSel.value);
       score = 0; round = 0; gameActive = true; paused = false;
       scoreEl.innerText = `Score: 0 / 0`;
-      initMic().then(nextRound);
+      initMic().then(nextRound).catch(()=>{});
     }
 
     function nextRound(){
@@ -199,34 +210,39 @@
 
     function sampleAndJudge(){
       if (!gameActive || paused) return;
-      analyser.getFloatTimeDomainData(tmpBuffer);
-      const start = Math.floor((tmpBuffer.length - DETECTOR_SIZE)/2);
-      for (let i=0;i<DETECTOR_SIZE;i++) dataArray[i] = tmpBuffer[start + i];
+      try {
+        analyser.getFloatTimeDomainData(tmpBuffer);
+        const start = Math.floor((tmpBuffer.length - DETECTOR_SIZE)/2);
+        for (let i=0;i<DETECTOR_SIZE;i++) dataArray[i] = tmpBuffer[start + i];
 
-      const [pitch, clarity] = detector.findPitch(dataArray, audioCtx.sampleRate);
-      if (!pitch || !isFinite(pitch) || clarity < CLARITY_MIN) return;
+        const [pitch, clarity] = detector.findPitch(dataArray, audioCtx.sampleRate);
+        if (!pitch || !isFinite(pitch) || clarity < CLARITY_MIN) return;
 
-      const playedMidi = Math.round(midiFromFreq(pitch));
-      const playedFreqNearest = freqFromMidi(playedMidi);
-      const playedIndex = noteIndexFromMidi(playedMidi);
-      const targetIndex = noteNames.indexOf(target.note);
-      const centsErr = 1200 * Math.log2(pitch / playedFreqNearest);
+        const playedMidi = Math.round(midiFromFreq(pitch));
+        const playedFreqNearest = freqFromMidi(playedMidi);
+        const playedIndex = noteIndexFromMidi(playedMidi);
+        const targetIndex = noteNames.indexOf(target.note);
+        const centsErr = 1200 * Math.log2(pitch / playedFreqNearest);
 
-      if (playedIndex === targetIndex && Math.abs(centsErr) <= TOL_CENTS){
-        score++;
-        resultEl.innerText = `✅ Correct! ${target.note} (~${pitch.toFixed(1)} Hz)`;
-        scoreEl.innerText  = `Score: ${score} / ${round}`;
-        playBeep("correct");
-        clearTimeout(timeoutHandle);
-        clearInterval(timerInterval);
-        stopPolling();
-        setTimeout(nextRound, 400);
-      } else {
-        resultEl.innerText = `❌ Wrong (~${noteNames[playedIndex]} • ${pitch.toFixed(1)} Hz). Target: ${target.note}`;
-        if (!sampleAndJudge._lastWrong || performance.now() - sampleAndJudge._lastWrong > 900) {
-          playBeep("wrong");
-          sampleAndJudge._lastWrong = performance.now();
+        if (playedIndex === targetIndex && Math.abs(centsErr) <= TOL_CENTS){
+          score++;
+          resultEl.innerText = `✅ Correct! ${target.note} (~${pitch.toFixed(1)} Hz)`;
+          scoreEl.innerText  = `Score: ${score} / ${round}`;
+          playBeep("correct");
+          clearTimeout(timeoutHandle);
+          clearInterval(timerInterval);
+          stopPolling();
+          setTimeout(nextRound, 400);
+        } else {
+          resultEl.innerText = `❌ Wrong (~${noteNames[playedIndex]} • ${pitch.toFixed(1)} Hz). Target: ${target.note}`;
+          if (!sampleAndJudge._lastWrong || performance.now() - sampleAndJudge._lastWrong > 900) {
+            playBeep("wrong");
+            sampleAndJudge._lastWrong = performance.now();
+          }
         }
+      } catch(e){
+        console.error(e);
+        setStatus('Runtime error in detection. Try refresh or change mic.', 'error');
       }
     }
 
@@ -244,21 +260,24 @@
     }
 
     function playBeep(type="correct"){
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.type = "sine";
-      if (type==="correct"){ osc.frequency.value = 880; gain.gain.value = 0.1; }
-      else { osc.frequency.value = 220; gain.gain.value = 0.12; }
-      osc.start();
-      osc.stop(ctx.currentTime + 0.15);
+      try{
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        ctx.resume && ctx.resume();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.type = "sine";
+        if (type==="correct"){ osc.frequency.value = 880; gain.gain.value = 0.1; }
+        else { osc.frequency.value = 220; gain.gain.value = 0.12; }
+        osc.start(); osc.stop(ctx.currentTime + 0.15);
+      }catch(_){}
     }
 
-    // Button bindings
-    startBtn.addEventListener('click', startGame);
-    pauseBtn.addEventListener('click', togglePause);
+    // Bind buttons (αν ξανατρέξει το script δεν θα διπλοδέσει)
+    startBtn.onclick = startGame;
+    pauseBtn.onclick = togglePause;
+
+  })();
   </script>
 </body>
 </html>
